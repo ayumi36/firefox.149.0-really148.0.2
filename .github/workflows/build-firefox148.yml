@@ -25,12 +25,15 @@ jobs:
 
       - name: Add swap for the Firefox build
         run: |
-          if [ -z "$(swapon --show --noheadings)" ]; then
+          # GitHub's runner already has a small 3 GiB swap device. Always add
+          # this dedicated file unless this exact file is already active.
+          if ! swapon --show=NAME --noheadings | grep -Fq /mnt/firefox-build.swap; then
             sudo fallocate -l 16G /mnt/firefox-build.swap
             sudo chmod 600 /mnt/firefox-build.swap
             sudo mkswap /mnt/firefox-build.swap
             sudo swapon /mnt/firefox-build.swap
           fi
+          swapon --show
           free -h
 
       - name: Checkout exact Termux rollback commit
@@ -84,7 +87,7 @@ jobs:
           ./scripts/run-docker.sh \
             env \
               CBINDGEN=/home/builder/.cargo-firefox148/bin/cbindgen \
-              TERMUX_PKG_MAKE_PROCESSES=4 \
+              TERMUX_PKG_MAKE_PROCESSES=2 \
             ./build-package.sh -I -w -C -a aarch64 firefox
 
       - name: Collect and verify package
