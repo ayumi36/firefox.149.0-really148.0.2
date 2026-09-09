@@ -1,1 +1,89 @@
+name: Build Firefox 148 Termux X11
 
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/build-firefox148.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build-firefox:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /opt/hostedtoolcache/Java_* || true
+          docker system prune -af || true
+          df -h
+
+      - name: Checkout exact Termux rollback commit
+        run: |
+          git clone https://github.com/termux/termux-packages.git
+          cd termux-packages
+          git checkout 3f062b301643941a3e1b30ee007bb3c0b67bac37
+
+          echo "=== Firefox package recipe ==="
+          grep -E '^TERMUX_PKG_VERSION=|^TERMUX_PKG_REVISION=' x11-packages/firefox/build.sh || true
+
+      - name: Prepare Termux Docker builder
+        working-directory: termux-packages
+        run: |
+          ./scripts/run-docker.sh true
+          ./scripts/free-space.sh || true
+          df -h
+
+      - name: Build Firefox for aarch64
+        working-directory: termux-packages
+        run: |
+          ./scripts/run-docker.sh -d \
+            ./build-package.sh -I -C -a aarch64 firefox
+
+      - name: Collect and verify package
+        run: |
+          mkdir -p artifact
+
+          find termux-packages -type f \
+            \( -name 'firefox_*_aarch64.deb' -o -name 'firefox_*.deb' \) \
+            -print -exec cp -v {} artifact/ \;
+
+          echo "=== Collected files ==="
+          ls -lh artifact/
+
+          DEB="$(find artifact -maxdepth 1 -type f -name 'firefox_*.deb' | head -n 1)"
+          if [ -z "$DEB" ]; then
+            echo "Firefox .deb was not produced"
+            exit 1
+          fi
+
+          echo "=== Package metadata ==="
+          dpkg-deb -f "$DEB" Package Version Architecture
+
+          VERSION="$(dpkg-deb -f "$DEB" Version)"
+          ARCH="$(dpkg-deb -f "$DEB" Architecture)"
+
+          case "$VERSION" in
+            149.0+really148.0.2*) ;;
+            *)
+              echo "Unexpected version: $VERSION"
+              exit 1
+              ;;
+          esac
+
+          test "$ARCH" = "aarch64"
+
+          sha256sum "$DEB" | tee artifact/SHA256SUMS.txt
+
+      - name: Upload Firefox 148 Termux X11 package
+        uses: actions/upload-artifact@v4
+        with:
+          name: firefox-148-termux-x11-aarch64
+          path: artifact/*
+          if-no-files-found: error
+          retention-days: 30
