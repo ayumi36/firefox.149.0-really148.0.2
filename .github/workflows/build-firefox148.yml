@@ -23,6 +23,16 @@ jobs:
           docker system prune -af || true
           df -h
 
+      - name: Add swap for the Firefox build
+        run: |
+          if [ -z "$(swapon --show --noheadings)" ]; then
+            sudo fallocate -l 16G /mnt/firefox-build.swap
+            sudo chmod 600 /mnt/firefox-build.swap
+            sudo mkswap /mnt/firefox-build.swap
+            sudo swapon /mnt/firefox-build.swap
+          fi
+          free -h
+
       - name: Checkout exact Termux rollback commit
         run: |
           git clone https://github.com/termux/termux-packages.git
@@ -42,31 +52,46 @@ jobs:
       - name: Build Firefox for aarch64
         working-directory: termux-packages
         run: |
-          ./scripts/run-docker.sh -d \
-            ./build-package.sh -I -C -a aarch64 firefox
+          # The rollback commit's dependency versions have aged out of the
+          # current Termux repositories. -w keeps the pinned Firefox recipe and
+          # patches, but downloads current signed dependency packages instead
+          # of rebuilding unrelated historical packages from stale URLs.
+          ./scripts/run-docker.sh \
+            env TERMUX_PKG_MAKE_PROCESSES=4 \
+            ./build-package.sh -I -w -C -a aarch64 firefox
 
       - name: Collect and verify package
         run: |
           mkdir -p artifact
 
-          find termux-packages -type f \
-            \( -name 'firefox_*_aarch64.deb' -o -name 'firefox_*.deb' \) \
-            -print -exec cp -v {} artifact/ \;
+          find termux-packages/output -maxdepth 1 -type f \
+            -name 'firefox_149.0+really148.0.2*_aarch64.deb' \
+            -print > artifact/debs.txt
+
+          DEB_COUNT="$(wc -l < artifact/debs.txt)"
+          if [ "$DEB_COUNT" -ne 1 ]; then
+            echo "Expected exactly one Firefox rollback .deb, found $DEB_COUNT"
+            cat artifact/debs.txt
+            exit 1
+          fi
+
+          DEB="$(head -n 1 artifact/debs.txt)"
+          cp -v "$DEB" artifact/
+          rm artifact/debs.txt
 
           echo "=== Collected files ==="
           ls -lh artifact/
 
-          DEB="$(find artifact -maxdepth 1 -type f -name 'firefox_*.deb' | head -n 1)"
-          if [ -z "$DEB" ]; then
-            echo "Firefox .deb was not produced"
-            exit 1
-          fi
+          DEB="artifact/$(basename "$DEB")"
 
           echo "=== Package metadata ==="
           dpkg-deb -f "$DEB" Package Version Architecture
 
+          PACKAGE="$(dpkg-deb -f "$DEB" Package)"
           VERSION="$(dpkg-deb -f "$DEB" Version)"
           ARCH="$(dpkg-deb -f "$DEB" Architecture)"
+
+          test "$PACKAGE" = "firefox"
 
           case "$VERSION" in
             149.0+really148.0.2*) ;;
@@ -78,7 +103,10 @@ jobs:
 
           test "$ARCH" = "aarch64"
 
-          sha256sum "$DEB" | tee artifact/SHA256SUMS.txt
+          (
+            cd artifact
+            sha256sum "$(basename "$DEB")" | tee SHA256SUMS.txt
+          )
 
       - name: Upload Firefox 148 Termux X11 package
         uses: actions/upload-artifact@v4
@@ -87,3 +115,4 @@ jobs:
           path: artifact/*
           if-no-files-found: error
           retention-days: 30
+          compression-level: 0
