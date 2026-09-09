@@ -44,20 +44,47 @@ jobs:
 
       - name: Prepare Termux Docker builder
         working-directory: termux-packages
+        env:
+          TERMUX_BUILDER_IMAGE_NAME: termux-firefox148-builder:3f062b3
+          CONTAINER_NAME: termux-firefox148-builder
         run: |
+          # Build the builder definition from the rollback commit. The current
+          # :latest image is Ubuntu 26.04, while this Firefox recipe was built
+          # and tested with the commit's Ubuntu 24.04 builder.
+          docker build --tag "$TERMUX_BUILDER_IMAGE_NAME" scripts
+          docker buildx prune -af || true
           ./scripts/run-docker.sh true
           ./scripts/free-space.sh || true
+
+          # Firefox 148 was released and tested with cbindgen 0.29.2. Newer
+          # cbindgen releases generate incompatible enum array declarations.
+          # Install it in a separate prefix and select it with Firefox's
+          # supported CBINDGEN override, without changing the pinned recipe.
+          ./scripts/run-docker.sh bash -lc '
+            set -euo pipefail
+            curl https://sh.rustup.rs -sSfo /tmp/rustup.sh
+            sh /tmp/rustup.sh -y --default-toolchain 1.94.1
+            . "$HOME/.cargo/env"
+            cargo install --root "$HOME/.cargo-firefox148" \
+              cbindgen --version 0.29.2 --locked
+            "$HOME/.cargo-firefox148/bin/cbindgen" --version
+          '
           df -h
 
       - name: Build Firefox for aarch64
         working-directory: termux-packages
+        env:
+          TERMUX_BUILDER_IMAGE_NAME: termux-firefox148-builder:3f062b3
+          CONTAINER_NAME: termux-firefox148-builder
         run: |
           # The rollback commit's dependency versions have aged out of the
           # current Termux repositories. -w keeps the pinned Firefox recipe and
           # patches, but downloads current signed dependency packages instead
           # of rebuilding unrelated historical packages from stale URLs.
           ./scripts/run-docker.sh \
-            env TERMUX_PKG_MAKE_PROCESSES=4 \
+            env \
+              CBINDGEN=/home/builder/.cargo-firefox148/bin/cbindgen \
+              TERMUX_PKG_MAKE_PROCESSES=4 \
             ./build-package.sh -I -w -C -a aarch64 firefox
 
       - name: Collect and verify package
